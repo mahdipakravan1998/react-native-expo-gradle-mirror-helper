@@ -12,12 +12,14 @@ This helper can:
 
 - Patch the Gradle wrapper distribution URL.
 - Configure a user-level Gradle init script.
+- Enforce repository modes (e.g., `mirror-only`) to clear hardcoded repositories and strictly route traffic through working mirrors.
 - Add configured Maven mirrors to Gradle plugin management.
 - Add configured Maven mirrors to dependency resolution management.
 - Add configured Maven mirrors to buildscript repositories.
 - Add configured Maven mirrors to selected React Native and Expo included builds.
 - Probe configured mirrors before selecting the final mirror order.
-- Configure shorter Gradle HTTP timeouts to avoid long waits on unreachable repositories.
+- Disable the Gradle configuration cache dynamically to prevent stale repository states.
+- Configure Gradle HTTP timeouts, max retries, and initial backoff times to avoid long waits on unreachable repositories.
 
 ## Why this exists
 
@@ -141,13 +143,18 @@ You can customize the script with environment variables.
 
 | Variable | Default | Description |
 |---|---|---|
-| `GRADLE_MIRROR_URLS` | Built-in mirror list | Comma-separated Maven mirror URLs |
-| `GRADLE_DISTRIBUTION_MIRROR_BASE` | Built-in Gradle distribution mirror | Base URL for Gradle distribution ZIP files |
+| `GRADLE_MIRROR_URLS` | Built-in list | Comma-separated Maven mirror URLs |
+| `GRADLE_DISTRIBUTION_MIRROR_BASE` | Built-in | Base URL for Gradle distribution ZIP files |
+| `GRADLE_MIRROR_REPOSITORY_MODE` | `mirror-only` | Defines how mirrors are applied: `mirror-only`, `mirror-first`, or `append` |
 | `GRADLE_MIRROR_ENABLE_OFFICIAL_REPOS` | `false` | Adds official Gradle, Google, and Maven repositories as fallback |
-| `GRADLE_MIRROR_ENABLE_INCLUDED_BUILD_PROJECT_REPOS` | `true` | Injects repositories into selected React Native / Expo included builds |
+| `GRADLE_MIRROR_INCLUDE_CONFIGURED_REPOS`| `true` | Keeps original configured mirrors even if probe fails to verify all artifacts |
+| `GRADLE_MIRROR_DISABLE_CONFIGURATION_CACHE`| `true` | Disables Gradle configuration cache to prevent stale repository states |
+| `GRADLE_MIRROR_ENABLE_INCLUDED_BUILD_PROJECT_REPOS`| `true` | Injects repositories into selected React Native / Expo included builds |
 | `GRADLE_MIRROR_PROBE_CLIENT` | `auto` | Probe client: `auto`, `fetch`, or `curl` |
 | `GRADLE_MIRROR_PROBE_TIMEOUT_SECONDS` | `5` | Timeout per mirror probe request |
-| `GRADLE_HTTP_TIMEOUT_MS` | `5000` | Gradle HTTP timeout in milliseconds |
+| `GRADLE_HTTP_TIMEOUT_MS` | `15000` | Gradle HTTP timeout in milliseconds |
+| `GRADLE_REPOSITORY_MAX_RETRIES` | `5` | Maximum number of retries for failing repository requests |
+| `GRADLE_REPOSITORY_INITIAL_BACKOFF_MS` | `1000` | Initial backoff time in milliseconds before retrying a request |
 
 ## Example: custom mirror list
 
@@ -201,7 +208,7 @@ C:\Users\<YOUR_USER>\.gradle\init.d\react-native-gradle-mirrors.init.gradle
 
 Inspired by a Gradle mirror patching snippet shared in the React Native community by [Kourosh Eydivandi (@kouroshey)](https://github.com/kouroshey).
 
-This project expands the idea into a more complete React Native / Expo Gradle mirror helper with Gradle wrapper patching, mirror probing, plugin management support, dependency resolution support, buildscript repository support, and included-build handling.
+This project expands the idea into a more complete React Native / Expo Gradle mirror helper with Gradle wrapper patching, mirror probing, plugin management support, dependency resolution support, buildscript repository support, included-build handling, and robust network timeout management.
 
 ## License
 
