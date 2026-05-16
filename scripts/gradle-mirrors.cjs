@@ -18,8 +18,8 @@ const gradlePropertiesFile = path.join(androidDir, 'gradle.properties');
 
 const defaultMirrorUrls = [
   'https://maven.myket.ir',
-  'https://archive.ito.gov.ir/gradle/maven-plugin/',
-  'https://archive.ito.gov.ir/gradle/maven-central/',
+  'https://archive.ito.gov.ir/gradle/maven-plugin',
+  'https://archive.ito.gov.ir/gradle/maven-central',
 ];
 
 const defaultGradleDistributionMirrorBase =
@@ -31,33 +31,53 @@ const fallbackVersions = {
   kotlinSerializationPlugin: '1.9.24',
 };
 
-// Official repositories stay opt-in so mirror-only builds remain deterministic.
+const repositoryMode = readEnumEnv(
+  'GRADLE_MIRROR_REPOSITORY_MODE',
+  ['mirror-only', 'mirror-first', 'append'],
+  'mirror-only',
+);
+
 const officialReposEnabled = readBooleanEnv(
   'GRADLE_MIRROR_ENABLE_OFFICIAL_REPOS',
   false,
 );
 
-// Included builds need targeted repository injection because Gradle treats them as isolated builds.
+const includeConfiguredMirrors = readBooleanEnv(
+  'GRADLE_MIRROR_INCLUDE_CONFIGURED_REPOS',
+  true,
+);
+
+const disableConfigurationCache = readBooleanEnv(
+  'GRADLE_MIRROR_DISABLE_CONFIGURATION_CACHE',
+  true,
+);
+
 const includedBuildProjectReposEnabled = readBooleanEnv(
   'GRADLE_MIRROR_ENABLE_INCLUDED_BUILD_PROJECT_REPOS',
   true,
 );
 
-// Allow the probe transport to be forced when fetch or curl behaves better in the local environment.
 const probeClient = readEnumEnv(
   'GRADLE_MIRROR_PROBE_CLIENT',
   ['auto', 'fetch', 'curl'],
   'auto',
 );
 
-// Keep mirror probes short so unavailable repositories do not stall setup.
 const probeTimeoutSeconds = readPositiveIntegerEnv(
   'GRADLE_MIRROR_PROBE_TIMEOUT_SECONDS',
   5,
 );
 
 const gradleHttpTimeoutMs = String(
-  readPositiveIntegerEnv('GRADLE_HTTP_TIMEOUT_MS', 5000),
+  readPositiveIntegerEnv('GRADLE_HTTP_TIMEOUT_MS', 15000),
+);
+
+const gradleRepositoryRetries = String(
+  readPositiveIntegerEnv('GRADLE_REPOSITORY_MAX_RETRIES', 5),
+);
+
+const gradleRepositoryInitialBackoff = String(
+  readPositiveIntegerEnv('GRADLE_REPOSITORY_INITIAL_BACKOFF_MS', 1000),
 );
 
 const mirrorUrls = parseMirrorUrls(
@@ -144,7 +164,7 @@ function readPositiveIntegerEnv(name, defaultValue) {
 }
 
 function parseMirrorUrls(rawValue, fallbackUrls) {
-  if (rawValue == null) {
+  if (rawValue == null || rawValue.trim() === '') {
     return fallbackUrls.map(normalizeBaseUrl);
   }
 
@@ -211,7 +231,7 @@ function writeTextAtomic(filePath, content) {
     try {
       if (fileExists(tempFile)) fs.unlinkSync(tempFile);
     } catch {
-      // Preserve the original write failure if temporary-file cleanup also fails.
+      // Preserve the original write failure.
     }
 
     throw error;
@@ -251,6 +271,11 @@ function upsertGradleProperty(content, key, value) {
   return `${content.trimEnd()}\n${line}\n`;
 }
 
+function removeGradleProperty(content, key) {
+  const pattern = new RegExp(`^${escapeRegExp(key)}=.*\\r?\\n?`, 'm');
+  return content.replace(pattern, '');
+}
+
 function appendJvmArg(content, arg) {
   const pattern = /^org\.gradle\.jvmargs=(.*)$/m;
   const match = content.match(pattern);
@@ -269,7 +294,7 @@ function appendJvmArg(content, arg) {
 }
 
 function normalizeBaseUrl(url) {
-  return url.replace(/\/+$/, '');
+  return String(url || '').replace(/\/+$/, '');
 }
 
 function createArtifactUrl(baseUrl, artifactPath) {
@@ -349,6 +374,19 @@ function detectAndroidGradlePluginVersion() {
         'expo-module-gradle-plugin',
         'build.gradle.kts',
       ),
+      path.join(
+        nodeModulesDir,
+        'expo-dev-client',
+        'android',
+        'expo-dev-launcher-gradle-plugin',
+        'build.gradle.kts',
+      ),
+      path.join(
+        nodeModulesDir,
+        'expo-dev-launcher',
+        'expo-dev-launcher-gradle-plugin',
+        'build.gradle.kts',
+      ),
     ],
     [
       /id\("com\.android\.application"\)\s*version\s*["']([^"']+)["']/,
@@ -402,22 +440,16 @@ function createProbeArtifacts() {
 
   return [
     {
+      name: 'Repository root',
+      path: '/',
+      weight: 1,
+      critical: false,
+    },
+    {
       name: 'Kotlin Gradle Plugin',
       path: `/org/jetbrains/kotlin/kotlin-gradle-plugin/${kotlinVersion}/kotlin-gradle-plugin-${kotlinVersion}.pom`,
       weight: 6,
       critical: true,
-    },
-    {
-      name: 'Kotlin Serialization Plugin',
-      path: `/org/jetbrains/kotlin/kotlin-serialization/${serializationVersion}/kotlin-serialization-${serializationVersion}.pom`,
-      weight: 4,
-      critical: false,
-    },
-    {
-      name: 'Kotlin Serialization Plugin Marker',
-      path: `/org/jetbrains/kotlin/plugin/serialization/org.jetbrains.kotlin.plugin.serialization.gradle.plugin/${serializationVersion}/org.jetbrains.kotlin.plugin.serialization.gradle.plugin-${serializationVersion}.pom`,
-      weight: 1,
-      critical: false,
     },
     {
       name: 'Android Gradle Plugin',
@@ -426,27 +458,15 @@ function createProbeArtifacts() {
       critical: true,
     },
     {
-      name: 'AndroidX Collection',
-      path: '/androidx/collection/collection/1.0.0/collection-1.0.0.pom',
-      weight: 2,
+      name: 'Kotlin Serialization Plugin',
+      path: `/org/jetbrains/kotlin/kotlin-serialization/${serializationVersion}/kotlin-serialization-${serializationVersion}.pom`,
+      weight: 3,
       critical: false,
     },
     {
-      name: 'AndroidX CoordinatorLayout',
-      path: '/androidx/coordinatorlayout/coordinatorlayout/1.1.0/coordinatorlayout-1.1.0.pom',
-      weight: 2,
-      critical: false,
-    },
-    {
-      name: 'Gson',
-      path: '/com/google/code/gson/gson/2.8.9/gson-2.8.9.pom',
-      weight: 1,
-      critical: false,
-    },
-    {
-      name: 'Guava',
-      path: '/com/google/guava/guava/31.0.1-jre/guava-31.0.1-jre.pom',
-      weight: 1,
+      name: 'Error Prone Annotations',
+      path: '/com/google/errorprone/error_prone_annotations/2.41.0/error_prone_annotations-2.41.0.jar',
+      weight: 3,
       critical: false,
     },
   ];
@@ -655,6 +675,7 @@ async function probeMirror(baseUrl, artifacts) {
   ).length;
 
   const hasAllCriticalArtifacts =
+    criticalArtifactCount === 0 ||
     availableCriticalArtifactCount === criticalArtifactCount;
 
   const averageElapsedMs =
@@ -729,6 +750,14 @@ async function selectMirrors() {
     .map((result) => result.baseUrl)
     .filter((url, index, array) => array.indexOf(url) === index);
 
+  if (includeConfiguredMirrors) {
+    for (const url of mirrorUrls) {
+      if (!selected.includes(url)) {
+        selected.push(url);
+      }
+    }
+  }
+
   if (selected.length === 0) {
     console.warn('Warning: mirror probe could not confirm any useful mirror.');
     console.warn(
@@ -736,15 +765,6 @@ async function selectMirrors() {
     );
 
     return mirrorUrls;
-  }
-
-  if (!usefulMirrors.some((result) => result.hasAllCriticalArtifacts)) {
-    console.warn(
-      'Warning: no probed mirror contained all critical Gradle plugin artifacts.',
-    );
-    console.warn(
-      'The generated init script may still fail unless another configured repository supplies them.',
-    );
   }
 
   return selected;
@@ -818,14 +838,19 @@ function patchGradleProperties() {
   after = upsertGradleProperty(
     after,
     'systemProp.org.gradle.internal.repository.max.retries',
-    '1',
+    gradleRepositoryRetries,
   );
 
   after = upsertGradleProperty(
     after,
     'systemProp.org.gradle.internal.repository.initial.backoff',
-    '250',
+    gradleRepositoryInitialBackoff,
   );
+
+  if (disableConfigurationCache) {
+    after = upsertGradleProperty(after, 'org.gradle.configuration-cache', 'false');
+    after = removeGradleProperty(after, 'org.gradle.configuration-cache.problems');
+  }
 
   return writeTextIfChanged(gradlePropertiesFile, before, after);
 }
@@ -855,18 +880,31 @@ function createGradleInitScript(selectedMirrorUrls) {
       mavenCentral()`
     : '';
 
-  const officialIncludedBuildReposBlock = officialReposEnabled
-    ? `
-      google()
-      mavenCentral()
-      gradlePluginPortal()`
-    : '';
+  const repositoryClearLine =
+    repositoryMode === 'mirror-only' || repositoryMode === 'mirror-first'
+      ? 'repositories.clear()'
+      : '';
+
+  const projectRepositoryClearLine =
+    repositoryMode === 'mirror-only' || repositoryMode === 'mirror-first'
+      ? 'repositories.clear()'
+      : '';
+
+  const pluginRepositoryClearLine =
+    repositoryMode === 'mirror-only' || repositoryMode === 'mirror-first'
+      ? 'repositories.clear()'
+      : '';
+
+  const dependencyRepositoryClearLine =
+    repositoryMode === 'mirror-only' || repositoryMode === 'mirror-first'
+      ? 'repositories.clear()'
+      : '';
 
   return `
-// Generated by the React Native / Expo Gradle mirror helper.
-// Keeps configured mirrors centralized while preserving project repositories.
+// Generated by the Gradle mirror helper.
+// Repository mode: ${repositoryMode}
 // Official repositories added by this init script: ${officialReposEnabled ? 'yes' : 'no'}
-// Included-build repository injection enabled: ${includedBuildProjectReposEnabled ? 'yes' : 'no'}
+// Included-build project repository injection enabled: ${includedBuildProjectReposEnabled ? 'yes' : 'no'}
 
 def mirrorUrls = [
 ${mirrorList}
@@ -897,15 +935,30 @@ def normalizePath = { value ->
   value == null ? '' : value.toString().replace('\\\\', '/')
 }
 
-def isReactNativeOrExpoIncludedBuild = { project ->
+def isNodeModulesBuild = { project ->
+  normalizePath(project.rootProject.rootDir.absolutePath).contains('/node_modules/')
+}
+
+def isReactNativeOrExpoBuild = { project ->
   def rootPath = normalizePath(project.rootProject.rootDir.absolutePath)
 
-  return rootPath.contains('/node_modules/@react-native/gradle-plugin') ||
-    rootPath.contains('/node_modules/expo-modules-autolinking/android/expo-gradle-plugin') ||
-    rootPath.contains('/node_modules/expo-modules-core/expo-module-gradle-plugin')
+  return rootPath.contains('/node_modules/@react-native/') ||
+    rootPath.contains('/node_modules/react-native') ||
+    rootPath.contains('/node_modules/expo') ||
+    rootPath.contains('/node_modules/expo-dev-client') ||
+    rootPath.contains('/node_modules/expo-dev-launcher') ||
+    rootPath.contains('/node_modules/expo-modules-autolinking') ||
+    rootPath.contains('/node_modules/expo-modules-core')
+}
+
+def shouldConfigureProjectRepositories = { project ->
+  return !isNodeModulesBuild(project) ||
+    (includedBuildProjectReposEnabled && isReactNativeOrExpoBuild(project))
 }
 
 def addConfiguredMirrors = { repositories ->
+  repositories.mavenLocal()
+
   mirrorUrls.eachWithIndex { repoUrl, index ->
     repositories.maven {
       name = "ConfiguredMirror" + (index + 1)
@@ -917,6 +970,7 @@ def addConfiguredMirrors = { repositories ->
 beforeSettings { settings ->
   settings.pluginManagement {
     repositories {
+      ${pluginRepositoryClearLine}
       addConfiguredMirrors(delegate)${officialPluginReposBlock}
     }
 
@@ -941,6 +995,7 @@ beforeSettings { settings ->
 settingsEvaluated { settings ->
   settings.dependencyResolutionManagement {
     repositories {
+      ${dependencyRepositoryClearLine}
       addConfiguredMirrors(delegate)${officialDependencyReposBlock}
     }
   }
@@ -949,13 +1004,15 @@ settingsEvaluated { settings ->
 allprojects { project ->
   buildscript {
     repositories {
+      ${repositoryClearLine}
       addConfiguredMirrors(delegate)${officialBuildscriptReposBlock}
     }
   }
 
-  if (includedBuildProjectReposEnabled && isReactNativeOrExpoIncludedBuild(project)) {
+  if (shouldConfigureProjectRepositories(project)) {
     repositories {
-      addConfiguredMirrors(delegate)${officialIncludedBuildReposBlock}
+      ${projectRepositoryClearLine}
+      addConfiguredMirrors(delegate)${officialDependencyReposBlock}
     }
   }
 }
@@ -979,10 +1036,22 @@ async function main() {
   console.log('Configuring Gradle mirrors...');
   console.log(`Probe timeout: ${probeTimeoutSeconds}s`);
   console.log(`Probe client: ${probeClient}`);
+  console.log(`Repository mode: ${repositoryMode}`);
   console.log(`Gradle HTTP timeout: ${gradleHttpTimeoutMs}ms`);
+  console.log(`Gradle repository retries: ${gradleRepositoryRetries}`);
   console.log(
     `Official Gradle repositories added by init script: ${
       officialReposEnabled ? 'yes' : 'no'
+    }`,
+  );
+  console.log(
+    `Configured mirrors preserved: ${
+      includeConfiguredMirrors ? 'yes' : 'no'
+    }`,
+  );
+  console.log(
+    `Configuration cache disabled: ${
+      disableConfigurationCache ? 'yes' : 'no'
     }`,
   );
   console.log(
@@ -990,7 +1059,6 @@ async function main() {
       includedBuildProjectReposEnabled ? 'enabled' : 'disabled'
     }`,
   );
-  console.log('Project/local repositories: preserved');
 
   if (!directoryExists(androidDir)) {
     exitWithError(
